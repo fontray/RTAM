@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include "ring_buffer.h"
 
-static size_t ring_buffer_available(const RingBuffer* rb, size_t head, size_t tail){
+static size_t ring_buffer_available_from_positions(const RingBuffer* rb, size_t head, size_t tail){
     if(head >= tail){
         return head - tail;
     }
@@ -12,7 +12,7 @@ static size_t ring_buffer_available(const RingBuffer* rb, size_t head, size_t ta
 }
 
 static size_t ring_buffer_free_space(const RingBuffer* rb, size_t head, size_t tail){
-    return rb->size - ring_buffer_available(rb, head, tail) - 1;
+    return rb->size - ring_buffer_available_from_positions(rb, head, tail) - 1;
 }
 
 RingBuffer* ring_buffer_init(size_t size){
@@ -70,7 +70,7 @@ int ring_buffer_pop(RingBuffer* rb, int16_t* data, size_t frames){
         return 1;
     }
 
-    if(ring_buffer_available(rb, head, tail) < frames){
+    if(ring_buffer_available_from_positions(rb, head, tail) < frames){
         return 0;
     }
 
@@ -87,6 +87,16 @@ int ring_buffer_pop(RingBuffer* rb, int16_t* data, size_t frames){
     return 1;
 }
 
+size_t ring_buffer_read_available(const RingBuffer* rb){
+    size_t head = atomic_load_explicit(&rb->head, memory_order_acquire);
+    size_t tail = atomic_load_explicit(&rb->tail, memory_order_acquire);
+    return ring_buffer_available_from_positions(rb, head, tail);
+}
+
+size_t ring_buffer_capacity(const RingBuffer* rb){
+    return rb->size - 1;
+}
+
 void ring_buffer_free(RingBuffer* rb){
     if(!rb){
         return;
@@ -95,7 +105,6 @@ void ring_buffer_free(RingBuffer* rb){
     free(rb->buffer); 
     free(rb);
 }
-
 
 
 

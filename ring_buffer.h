@@ -28,6 +28,8 @@ void ring_buffer_free(RingBuffer* rb);
 
 int ring_buffer_push(RingBuffer* rb, const int16_t* data, size_t frames);
 int ring_buffer_pop(RingBuffer* rb, int16_t* data, size_t frames);
+size_t ring_buffer_read_available(const RingBuffer* rb);
+size_t ring_buffer_capacity(const RingBuffer* rb);
 
 
 
