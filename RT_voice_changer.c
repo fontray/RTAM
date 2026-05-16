@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -17,11 +18,17 @@ int running = 1;
 
 #define PB_SIZE (PERIOD_SIZE * CHANNELS)
 
-void set_thread_priority(pthread_t tid, int priority) {
-    struct sched_param param;
-    param.sched_priority = priority;
-    if (pthread_setschedparam(tid, SCHED_FIFO, &param) != 0) {
-        perror("Failed to set thread priority (Try running with sudo)");
+void set_thread_affinity(pthread_t tid, int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    
+    int s = pthread_setaffinity_np(tid, sizeof(cpu_set_t), &cpuset);
+    if(s != 0){
+        perror("Thread affinity setting failed");
+    }
+    else{
+        printf("Thread assign on %d\n", core_id);
     }
 }
 
@@ -62,8 +69,11 @@ void* process_thread(void* arg){
     
     while(running){
         ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE);
+       
         simple_lpf(buffer);
+        
         ring_buffer_push(rb_change_to_play, buffer, PB_SIZE);
+       
     }
     return NULL;
 }
@@ -100,6 +110,7 @@ int main(){
     rb_cap_to_change = ring_buffer_init(PB_SIZE * 20);
     rb_change_to_play = ring_buffer_init(PB_SIZE * 20);
     
+    
     int16_t silence[PB_SIZE] = {0};
     for(int i = 0; i < 10; i++){
         ring_buffer_push(rb_change_to_play, silence, PB_SIZE);
@@ -109,6 +120,10 @@ int main(){
     pthread_create(&cap_tid, NULL, capture_thread, NULL);
     pthread_create(&proc_tid, NULL, process_thread, NULL);
     pthread_create(&play_tid, NULL, playback_thread, NULL);
+    
+    set_thread_affinity(cap_tid, 1);
+    set_thread_affinity(play_tid, 2);
+    set_thread_affinity(proc_tid, 3);
     
     printf("[System] Running. Press Ctrl+C to stop.\n");
     

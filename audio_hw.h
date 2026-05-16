@@ -6,7 +6,7 @@
 #include <stdlib.h>
 
 // Define hw_param
-#define PCM_DEVICE "hw:3,0"
+#define PCM_DEVICE "hw:1,0"
 #define SAMPLE_RATE 44100
 #define CHANNELS 2
 #define FORMAT SND_PCM_FORMAT_S16_LE

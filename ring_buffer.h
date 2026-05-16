@@ -7,6 +7,8 @@
 #include <time.h>
 #include <pthread.h>
 
+
+
 typedef struct{
     int16_t* buffer;
     int size;
@@ -20,10 +22,14 @@ typedef struct{
 } RingBuffer;
 
 RingBuffer* ring_buffer_init(int size);
+
+
 void ring_buffer_free(RingBuffer* rb);
+
 
 void ring_buffer_push(RingBuffer* rb, int16_t* data, int frames);
 void ring_buffer_pop(RingBuffer* rb, int16_t* data, int frames);
+
 
 
 #endif
