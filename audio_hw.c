@@ -28,32 +28,68 @@ static int hw_params(snd_pcm_t *handle){
         return -1;
     }
 
-    unsigned int actual_rate;
-    int dir;
-    snd_pcm_uframes_t actual_period;
-    
     if((err = snd_pcm_hw_params_set_rate_near(handle, params, &rate, 0)) < 0){
         fprintf(stderr, "Could not setting sample rate %s\n", snd_strerror(err));
         return -1;
     }
 
-    snd_pcm_uframes_t frames = PERIOD_SIZE;
-    if((err = snd_pcm_hw_params_set_period_size_near(handle, params, &frames, 0)) < 0){
+    snd_pcm_uframes_t period_frames = PERIOD_SIZE;
+    if((err = snd_pcm_hw_params_set_period_size_near(handle, params, &period_frames, 0)) < 0){
         fprintf(stderr, "Could not setting period size %s\n", snd_strerror(err));
         return -1;
     }
-    
-    /*
-    snd_pcm_hw_params_get_rate(params, &actual_rate, &dir);
-    snd_pcm_hw_params_get_period_size(params, &actual_period, &dir);
-    const char *name;
-    snd_pcm_stream_t stream = snd_pcm_stream(handle);
-    name = (stream == SND_PCM_STREAM_CAPTURE) ? "CAPTURE" : "PLAYBACK";
-    printf("[ALSA %s] Actual setting->rate : %u hz, period: %lu frames\n", name, actual_rate, (unsigned long)actual_period);
-    */
+
+    snd_pcm_uframes_t buffer_frames = BUFFER_SIZE;
+    if((err = snd_pcm_hw_params_set_buffer_size_near(handle, params, &buffer_frames)) < 0){
+        fprintf(stderr, "Could not setting buffer size %s\n", snd_strerror(err));
+        return -1;
+    }
     
     if((err = snd_pcm_hw_params(handle, params)) < 0){
         fprintf(stderr, "Could not set params into WM8960 %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    unsigned int actual_rate;
+    int dir;
+    snd_pcm_uframes_t actual_period;
+    snd_pcm_uframes_t actual_buffer;
+    snd_pcm_hw_params_get_rate(params, &actual_rate, &dir);
+    snd_pcm_hw_params_get_period_size(params, &actual_period, &dir);
+    snd_pcm_hw_params_get_buffer_size(params, &actual_buffer);
+
+    const char *name = (snd_pcm_stream(handle) == SND_PCM_STREAM_CAPTURE) ? "CAPTURE" : "PLAYBACK";
+    printf("[ALSA %s] rate: %u hz, period: %lu frames, buffer: %lu frames\n",
+           name, actual_rate, (unsigned long)actual_period, (unsigned long)actual_buffer);
+
+    return 0;
+}
+
+static int sw_params(snd_pcm_t *handle){
+    snd_pcm_sw_params_t *params;
+    int err;
+
+    snd_pcm_sw_params_alloca(&params);
+
+    if((err = snd_pcm_sw_params_current(handle, params)) < 0){
+        fprintf(stderr, "Could not get software params %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    if((err = snd_pcm_sw_params_set_avail_min(handle, params, PERIOD_SIZE)) < 0){
+        fprintf(stderr, "Could not setting avail_min %s\n", snd_strerror(err));
+        return -1;
+    }
+
+    if(snd_pcm_stream(handle) == SND_PCM_STREAM_PLAYBACK){
+        if((err = snd_pcm_sw_params_set_start_threshold(handle, params, PERIOD_SIZE)) < 0){
+            fprintf(stderr, "Could not setting start threshold %s\n", snd_strerror(err));
+            return -1;
+        }
+    }
+
+    if((err = snd_pcm_sw_params(handle, params)) < 0){
+        fprintf(stderr, "Could not set software params %s\n", snd_strerror(err));
         return -1;
     }
 
@@ -76,6 +112,7 @@ int alsa_hw_init(ALSA_Config *config, ALSA_Mode mode){
 		}
 
         if(hw_params(config->cap_handle) < 0) return -1;
+        if(sw_params(config->cap_handle) < 0) return -1;
         printf("[ALSA] capture device ready (%s)\n", PCM_DEVICE);
 	}
 
@@ -86,6 +123,7 @@ int alsa_hw_init(ALSA_Config *config, ALSA_Mode mode){
 		}
 
         if(hw_params(config->play_handle) < 0) return -1;
+        if(sw_params(config->play_handle) < 0) return -1;
         printf("[ALSA] record device ready (%s)\n", PCM_DEVICE);
 	}
 
@@ -121,4 +159,3 @@ int alsa_hw_recover(snd_pcm_t *handle, int err){
     }
     return err;
 }
-

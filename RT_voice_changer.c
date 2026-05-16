@@ -3,10 +3,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #include "audio_hw.h"
 #include "ring_buffer.h"
@@ -14,9 +17,11 @@
 ALSA_Config alsa_config;
 RingBuffer* rb_cap_to_change = NULL;  
 RingBuffer* rb_change_to_play = NULL;
-int running = 1;
+static atomic_int running = 1;
 
 #define PB_SIZE (PERIOD_SIZE * CHANNELS)
+#define RING_BUFFER_PERIODS 4
+#define PROCESS_IDLE_SLEEP_NS 50000L
 
 void set_thread_affinity(pthread_t tid, int core_id) {
     cpu_set_t cpuset;
@@ -32,6 +37,13 @@ void set_thread_affinity(pthread_t tid, int core_id) {
     }
 }
 
+static void sleep_for_ns(long ns){
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = ns;
+    nanosleep(&req, NULL);
+}
+
 void simple_lpf(int16_t* samples){
     static float last_sample = 0.0f;
     float alpha = 0.4f;
@@ -45,17 +57,18 @@ void simple_lpf(int16_t* samples){
 
 // --- Thread1: capture ---
 void* capture_thread(void* arg){
+    (void)arg;
     int16_t buffer[PB_SIZE];
     printf("[Thread] Capture thread started.\n");
     
-    while(running){
+    while(atomic_load_explicit(&running, memory_order_relaxed)){
         int err = snd_pcm_readi(alsa_config.cap_handle, buffer, PERIOD_SIZE);
         if(err < 0){
             alsa_hw_recover(alsa_config.cap_handle, err);
             continue;
         }
         
-        // write
+        // Drop the newest captured block if the process thread falls behind.
         ring_buffer_push(rb_cap_to_change, buffer, PB_SIZE);
     }
 
@@ -64,14 +77,19 @@ void* capture_thread(void* arg){
 
 // --- Thread2: process ---
 void* process_thread(void* arg){
+    (void)arg;
     int16_t buffer[PB_SIZE];
     printf("[Thread] Process thread started.\n");
     
-    while(running){
-        ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE);
+    while(atomic_load_explicit(&running, memory_order_relaxed)){
+        if(!ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE)){
+            sleep_for_ns(PROCESS_IDLE_SLEEP_NS);
+            continue;
+        }
        
         simple_lpf(buffer);
         
+        // Drop this processed block if playback falls behind.
         ring_buffer_push(rb_change_to_play, buffer, PB_SIZE);
        
     }
@@ -80,11 +98,15 @@ void* process_thread(void* arg){
 
 // --- Thread3: playback ---
 void* playback_thread(void* arg){
+    (void)arg;
     int16_t buffer[PB_SIZE];
     printf("[Thread] Playback thread started.\n");
     
-    while(running){
-        ring_buffer_pop(rb_change_to_play, buffer, PB_SIZE);
+    while(atomic_load_explicit(&running, memory_order_relaxed)){
+        if(!ring_buffer_pop(rb_change_to_play, buffer, PB_SIZE)){
+            memset(buffer, 0, sizeof(buffer));
+        }
+
         int err = snd_pcm_writei(alsa_config.play_handle, buffer, PERIOD_SIZE);
         if(err < 0){
             alsa_hw_recover(alsa_config.play_handle, err);
@@ -95,8 +117,9 @@ void* playback_thread(void* arg){
 
 // stop running
 void handle_process(int sig){
+    (void)sig;
     printf("\n[System] Stop...!\n");
-    running = 0;
+    atomic_store_explicit(&running, 0, memory_order_relaxed);
 }
 
 int main(){
@@ -107,23 +130,25 @@ int main(){
     if(alsa_hw_init(&alsa_config, ALSA_MODE_DUPLEX) < 0) return -1;
 
     // Initial Ring Buffer
-    rb_cap_to_change = ring_buffer_init(PB_SIZE * 20);
-    rb_change_to_play = ring_buffer_init(PB_SIZE * 20);
-    
-    
-    int16_t silence[PB_SIZE] = {0};
-    for(int i = 0; i < 10; i++){
-        ring_buffer_push(rb_change_to_play, silence, PB_SIZE);
+    rb_cap_to_change = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
+    rb_change_to_play = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
+    if(!rb_cap_to_change || !rb_change_to_play){
+        fprintf(stderr, "[System] Failed to initialize ring buffers.\n");
+        ring_buffer_free(rb_cap_to_change);
+        ring_buffer_free(rb_change_to_play);
+        alsa_hw_close(&alsa_config);
+        return -1;
     }
-    
     // Create thread
     pthread_create(&cap_tid, NULL, capture_thread, NULL);
     pthread_create(&proc_tid, NULL, process_thread, NULL);
     pthread_create(&play_tid, NULL, playback_thread, NULL);
     
+    /*
     set_thread_affinity(cap_tid, 1);
     set_thread_affinity(play_tid, 2);
     set_thread_affinity(proc_tid, 3);
+    */  
     
     printf("[System] Running. Press Ctrl+C to stop.\n");
     
@@ -140,5 +165,3 @@ int main(){
     printf("[System] Shutdown.\n");
     return 0;
 }
-
-

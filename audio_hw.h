@@ -11,7 +11,7 @@
 #define CHANNELS 2
 #define FORMAT SND_PCM_FORMAT_S16_LE
 #define PERIOD_SIZE (256 * 2)
-#define BUFFER_SIZE (PERIOD_SIZE * 8)
+#define BUFFER_SIZE (PERIOD_SIZE * 3)
 
 typedef enum{
     ALSA_MODE_CAP = 0,
@@ -34,4 +34,3 @@ void alsa_hw_close(ALSA_Config *config);
 int alsa_hw_recover(snd_pcm_t *handle, int err);
 
 #endif
-
