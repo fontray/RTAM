@@ -17,8 +17,8 @@
 #include "ring_buffer.h"
 
 ALSA_Config alsa_config;
-RingBuffer* rb_cap_to_change = NULL;  
-RingBuffer* rb_change_to_play = NULL;
+RingBuffer* rb_cap_to_proc = NULL;  
+RingBuffer* rb_proc_to_play = NULL;
 sem_t sem_cap_to_change;
 static atomic_int running = 1;
 
@@ -99,7 +99,7 @@ void* capture_thread(void* arg){
         }
         
         // Drop the newest captured block if the process thread falls behind.
-        if(!ring_buffer_push(rb_cap_to_change, buffer, PB_SIZE)){
+        if(!ring_buffer_push(rb_cap_to_proc, buffer, PB_SIZE)){
             metrics_record_capture_drop();
         }
         else sem_post(&sem_cap_to_change);
@@ -119,12 +119,12 @@ void* process_thread(void* arg){
         if(!atomic_load_explicit(&running, memory_order_relaxed)){
             break;
         }
-        if(!ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE)){
+        if(!ring_buffer_pop(rb_cap_to_proc, buffer, PB_SIZE)){
             continue;
         }
 
         voice_filter(buffer);
-        ring_buffer_push(rb_change_to_play, buffer, PB_SIZE);
+        ring_buffer_push(rb_proc_to_play, buffer, PB_SIZE);
     }
     return NULL;
 }
@@ -136,7 +136,7 @@ void* playback_thread(void* arg){
     printf("[Thread] Playback thread started.\n");
     
     while(atomic_load_explicit(&running, memory_order_relaxed)){
-        if(!ring_buffer_pop(rb_change_to_play, buffer, PB_SIZE)){
+        if(!ring_buffer_pop(rb_proc_to_play, buffer, PB_SIZE)){
             memset(buffer, 0, sizeof(buffer));
             metrics_record_playback_silence();
         }
@@ -170,17 +170,17 @@ int main(){
     if(alsa_hw_init(&alsa_config, ALSA_MODE_DUPLEX) < 0) return -1;
 
     // Initial Ring Buffer
-    rb_cap_to_change = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
-    rb_change_to_play = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
-    if(!rb_cap_to_change || !rb_change_to_play){
+    rb_cap_to_proc = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
+    rb_proc_to_play = ring_buffer_init(PB_SIZE * RING_BUFFER_PERIODS);
+    if(!rb_cap_to_proc || !rb_proc_to_play){
         fprintf(stderr, "[System] Failed to initialize ring buffers.\n");
-        ring_buffer_free(rb_cap_to_change);
-        ring_buffer_free(rb_change_to_play);
+        ring_buffer_free(rb_cap_to_proc);
+        ring_buffer_free(rb_proc_to_play);
         alsa_hw_close(&alsa_config);
         return -1;
     }
 
-    metrics_set_ring_buffers(rb_cap_to_change, rb_change_to_play);
+    metrics_set_ring_buffers(rb_cap_to_proc, rb_proc_to_play);
 
     // Create thread
     pthread_create(&cap_tid, NULL, capture_thread, NULL);
@@ -203,8 +203,8 @@ int main(){
     pthread_join(metrics_tid, NULL);
 
     // Release
-    ring_buffer_free(rb_cap_to_change);
-    ring_buffer_free(rb_change_to_play);
+    ring_buffer_free(rb_cap_to_proc);
+    ring_buffer_free(rb_proc_to_play);
     sem_destroy(&sem_cap_to_change);
     alsa_hw_close(&alsa_config);
 
