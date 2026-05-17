@@ -10,6 +10,7 @@
 #include <time.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <semaphore.h>
 
 #include "audio_hw.h"
 #include "metrics.h"
@@ -18,11 +19,11 @@
 ALSA_Config alsa_config;
 RingBuffer* rb_cap_to_change = NULL;  
 RingBuffer* rb_change_to_play = NULL;
+sem_t sem_cap_to_change;
 static atomic_int running = 1;
 
 #define PB_SIZE (PERIOD_SIZE * CHANNELS)
 #define RING_BUFFER_PERIODS 4
-#define PROCESS_IDLE_SLEEP_NS 500000L
 #define NLMS_TAPS 16
 #define NLMS_DELAY 4
 
@@ -38,13 +39,6 @@ void set_thread_affinity(pthread_t tid, int core_id) {
     else{
         printf("Thread assign on %d\n", core_id);
     }
-}
-
-static void sleep_for_ns(long ns){
-    struct timespec req;
-    req.tv_sec = 0;
-    req.tv_nsec = ns;
-    nanosleep(&req, NULL);
 }
 
 void voice_filter(int16_t* samples){
@@ -108,6 +102,7 @@ void* capture_thread(void* arg){
         if(!ring_buffer_push(rb_cap_to_change, buffer, PB_SIZE)){
             metrics_record_capture_drop();
         }
+        else sem_post(&sem_cap_to_change);
     }
 
     return NULL;
@@ -120,8 +115,11 @@ void* process_thread(void* arg){
     printf("[Thread] Process thread started.\n");
     
     while(atomic_load_explicit(&running, memory_order_relaxed)){
+        sem_wait(&sem_cap_to_change);
+        if(!atomic_load_explicit(&running, memory_order_relaxed)){
+            break;
+        }
         if(!ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE)){
-            sleep_for_ns(PROCESS_IDLE_SLEEP_NS);
             continue;
         }
 
@@ -159,11 +157,13 @@ void handle_process(int sig){
     (void)sig;
     printf("\n[System] Stop...!\n");
     atomic_store_explicit(&running, 0, memory_order_relaxed);
+    sem_post(&sem_cap_to_change);
     metrics_stop();
 }
 
 int main(){
     pthread_t cap_tid, proc_tid, play_tid, metrics_tid;
+    sem_init(&sem_cap_to_change, 0, 0);
     signal(SIGINT, handle_process);
 
     // Initial ALSA 
@@ -205,6 +205,7 @@ int main(){
     // Release
     ring_buffer_free(rb_cap_to_change);
     ring_buffer_free(rb_change_to_play);
+    sem_destroy(&sem_cap_to_change);
     alsa_hw_close(&alsa_config);
 
     printf("[System] Shutdown.\n");
