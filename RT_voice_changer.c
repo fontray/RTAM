@@ -22,8 +22,7 @@ static atomic_int running = 1;
 
 #define PB_SIZE (PERIOD_SIZE * CHANNELS)
 #define RING_BUFFER_PERIODS 4
-#define PROCESS_IDLE_SLEEP_NS 50000L
-#define NS_PER_SEC 1000000000LL
+#define PROCESS_IDLE_SLEEP_NS 500000L
 
 void set_thread_affinity(pthread_t tid, int core_id) {
     cpu_set_t cpuset;
@@ -44,11 +43,6 @@ static void sleep_for_ns(long ns){
     req.tv_sec = 0;
     req.tv_nsec = ns;
     nanosleep(&req, NULL);
-}
-
-static long long elapsed_ns(struct timespec start, struct timespec end){
-    return (long long)(end.tv_sec - start.tv_sec) * NS_PER_SEC +
-           (long long)(end.tv_nsec - start.tv_nsec);
 }
 
 static float clamp_float(float value, float min_value, float max_value){
@@ -137,8 +131,6 @@ void* capture_thread(void* arg){
     printf("[Thread] Capture thread started.\n");
     
     while(atomic_load_explicit(&running, memory_order_relaxed)){
-        metrics_record_capture_cpu(sched_getcpu());
-
         int err = snd_pcm_readi(alsa_config.cap_handle, buffer, PERIOD_SIZE);
         if(err < 0){
             if(err == -EPIPE){
@@ -149,10 +141,7 @@ void* capture_thread(void* arg){
         }
         
         // Drop the newest captured block if the process thread falls behind.
-        if(ring_buffer_push(rb_cap_to_change, buffer, PB_SIZE)){
-            metrics_record_capture_frames(PERIOD_SIZE);
-        }
-        else{
+        if(!ring_buffer_push(rb_cap_to_change, buffer, PB_SIZE)){
             metrics_record_capture_drop();
         }
     }
@@ -167,27 +156,13 @@ void* process_thread(void* arg){
     printf("[Thread] Process thread started.\n");
     
     while(atomic_load_explicit(&running, memory_order_relaxed)){
-        metrics_record_process_cpu(sched_getcpu());
-
         if(!ring_buffer_pop(rb_cap_to_change, buffer, PB_SIZE)){
             sleep_for_ns(PROCESS_IDLE_SLEEP_NS);
             continue;
         }
-       
-        struct timespec start;
-        struct timespec end;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        voice_enhance(buffer);
-        clock_gettime(CLOCK_MONOTONIC, &end);
 
-        unsigned long long process_ns = (unsigned long long)elapsed_ns(start, end);
-        metrics_record_process_block(PERIOD_SIZE, process_ns);
-        
-        // Drop this processed block if playback falls behind.
-        if(!ring_buffer_push(rb_change_to_play, buffer, PB_SIZE)){
-            metrics_record_process_drop();
-        }
-       
+        voice_enhance(buffer);
+        ring_buffer_push(rb_change_to_play, buffer, PB_SIZE);
     }
     return NULL;
 }
@@ -199,8 +174,6 @@ void* playback_thread(void* arg){
     printf("[Thread] Playback thread started.\n");
     
     while(atomic_load_explicit(&running, memory_order_relaxed)){
-        metrics_record_playback_cpu(sched_getcpu());
-
         if(!ring_buffer_pop(rb_change_to_play, buffer, PB_SIZE)){
             memset(buffer, 0, sizeof(buffer));
             metrics_record_playback_silence();
@@ -212,9 +185,6 @@ void* playback_thread(void* arg){
                 metrics_record_playback_xrun();
             }
             alsa_hw_recover(alsa_config.play_handle, err);
-        }
-        else{
-            metrics_record_playback_frames(PERIOD_SIZE);
         }
     }
     return NULL;
