@@ -23,6 +23,8 @@ static atomic_int running = 1;
 #define PB_SIZE (PERIOD_SIZE * CHANNELS)
 #define RING_BUFFER_PERIODS 4
 #define PROCESS_IDLE_SLEEP_NS 500000L
+#define NLMS_TAPS 16
+#define NLMS_DELAY 4
 
 void set_thread_affinity(pthread_t tid, int core_id) {
     cpu_set_t cpuset;
@@ -45,82 +47,44 @@ static void sleep_for_ns(long ns){
     nanosleep(&req, NULL);
 }
 
-static float clamp_float(float value, float min_value, float max_value){
-    if(value < min_value){
-        return min_value;
-    }
-    if(value > max_value){
-        return max_value;
-    }
-    return value;
-}
+void voice_filter(int16_t* samples){
+    static float nlms_weights[CHANNELS][NLMS_TAPS] = {{0.0f}};
+    static float nlms_history[CHANNELS][NLMS_TAPS + NLMS_DELAY] = {{0.0f}};
 
-void voice_enhance(int16_t* samples){
-    static float dc_prev_input[CHANNELS] = {0.0f};
-    static float dc_prev_output[CHANNELS] = {0.0f};
-    static float preemphasis_prev[CHANNELS] = {0.0f};
-    static float noise_env[CHANNELS] = {0.0f};
-    static float gate_gain_state[CHANNELS] = {1.0f};
-    static float smooth_prev[CHANNELS] = {0.0f};
-
-    const float sample_scale = 1.0f / 32768.0f;
-    const float dc_alpha = 0.995f;
-    const float preemphasis = 0.72f;
-    const float preemphasis_mix = 0.18f;
-    const float high_smooth_mix = 0.18f;
-    const float gate_floor = 0.04f;
-    const float gate_open = 0.045f;
-    const float gate_close = 0.014f;
-    const float compressor_threshold = 0.35f;
-    const float compressor_ratio = 3.0f;
-    const float makeup_gain = 1.18f;
+    const float nlms_mu = 0.05f;
+    const float nlms_epsilon = 1.0e-6f;
+    const float dry_mix = 0.25f;
 
     for(int i = 0; i < PB_SIZE; i++){
         int ch = i % CHANNELS;
-        float x = (float)samples[i] * sample_scale;
+        float x = samples[i] / 32768.0f;
 
-        float dc_blocked = x - dc_prev_input[ch] + dc_alpha * dc_prev_output[ch];
-        dc_prev_input[ch] = x;
-        dc_prev_output[ch] = dc_blocked;
-
-        float emphasized = dc_blocked - preemphasis * preemphasis_prev[ch];
-        preemphasis_prev[ch] = dc_blocked;
-        float y = (1.0f - preemphasis_mix) * dc_blocked + preemphasis_mix * emphasized;
-
-        float abs_y = fabsf(y);
-        float env_alpha = abs_y > noise_env[ch] ? 0.25f : 0.005f;
-        noise_env[ch] += env_alpha * (abs_y - noise_env[ch]);
-
-        float gate_gain;
-        if(noise_env[ch] <= gate_close){
-            gate_gain = gate_floor;
-        }
-        else if(noise_env[ch] >= gate_open){
-            gate_gain = 1.0f;
-        }
-        else{
-            float t = (noise_env[ch] - gate_close) / (gate_open - gate_close);
-            gate_gain = gate_floor + t * (1.0f - gate_floor);
+        float y = 0.0f;
+        float power = nlms_epsilon;
+        for(int tap = 0; tap < NLMS_TAPS; tap++){
+            float ref = nlms_history[ch][NLMS_DELAY + tap];
+            y += nlms_weights[ch][tap] * ref;
+            power += ref * ref;
         }
 
-        float gate_alpha = gate_gain > gate_gain_state[ch] ? 0.08f : 0.002f;
-        gate_gain_state[ch] += gate_alpha * (gate_gain - gate_gain_state[ch]);
-        y *= gate_gain_state[ch];
-
-        float sign = y < 0.0f ? -1.0f : 1.0f;
-        float magnitude = fabsf(y);
-        if(magnitude > compressor_threshold){
-            magnitude = compressor_threshold +
-                        (magnitude - compressor_threshold) / compressor_ratio;
+        float error = x - y;
+        float step = nlms_mu * error / power;
+        for(int tap = 0; tap < NLMS_TAPS; tap++){
+            float ref = nlms_history[ch][NLMS_DELAY + tap];
+            nlms_weights[ch][tap] += step * ref;
         }
 
-        y = sign * magnitude * makeup_gain;
-        y = tanhf(y * 1.05f);
-        y = (1.0f - high_smooth_mix) * y + high_smooth_mix * smooth_prev[ch];
-        smooth_prev[ch] = y;
-        y = clamp_float(y, -0.98f, 0.98f);
+        for(int hist = NLMS_TAPS + NLMS_DELAY - 1; hist > 0; hist--){
+            nlms_history[ch][hist] = nlms_history[ch][hist - 1];
+        }
+        nlms_history[ch][0] = x;
 
-        samples[i] = (int16_t)(y * 32767.0f);
+        float out = (1.0f - dry_mix) * y + dry_mix * x;
+
+        if(out > 0.98f) out = 0.98f;
+        if(out < -0.98f) out = -0.98f;
+
+        samples[i] = (int16_t)(out * 32767.0f);
     }
 }
 
@@ -161,7 +125,7 @@ void* process_thread(void* arg){
             continue;
         }
 
-        voice_enhance(buffer);
+        voice_filter(buffer);
         ring_buffer_push(rb_change_to_play, buffer, PB_SIZE);
     }
     return NULL;
